@@ -8,7 +8,8 @@ use hmac::{Hmac, Mac};
 use omnisette::{AnisetteClient, AnisetteProvider, ArcAnisetteClient, LoginClientInfo};
 use plist::{Dictionary, Value};
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue}, Certificate, Client, ClientBuilder, Proxy, Response
+    header::{HeaderMap, HeaderName, HeaderValue},
+    Certificate, Client, ClientBuilder, Proxy, Response,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -127,7 +128,7 @@ struct VerifyCode {
 #[derive(Serialize, Debug, Clone)]
 #[repr(C)]
 struct PhoneNumber {
-    id: u32
+    id: u32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -137,7 +138,7 @@ pub struct VerifyBody {
     phone_number: PhoneNumber,
     mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    security_code: Option<VerifyCode>
+    security_code: Option<VerifyCode>,
 }
 
 #[repr(C)]
@@ -147,7 +148,7 @@ pub struct TrustedPhoneNumber {
     pub number_with_dial_code: String,
     pub last_two_digits: String,
     pub push_mode: String,
-    pub id: u32
+    pub id: u32,
 }
 
 #[derive(Deserialize)]
@@ -176,7 +177,9 @@ pub struct AuthenticationExtras {
 //     }
 // }
 
-async fn parse_response(res: Result<Response, reqwest::Error>) -> Result<plist::Dictionary, crate::Error> {
+async fn parse_response(
+    res: Result<Response, reqwest::Error>,
+) -> Result<plist::Dictionary, crate::Error> {
     let res = res?.text().await?;
     let res: plist::Dictionary = plist::from_bytes(res.as_bytes())?;
     let res: plist::Value = res.get("Response").unwrap().to_owned();
@@ -187,8 +190,10 @@ async fn parse_response(res: Result<Response, reqwest::Error>) -> Result<plist::
 }
 
 impl<T: AnisetteProvider> AppleAccount<T> {
-
-    pub fn new_with_anisette(client_info: LoginClientInfo, anisette:  ArcAnisetteClient<T>) -> Result<Self, crate::Error> {
+    pub fn new_with_anisette(
+        client_info: LoginClientInfo,
+        anisette: ArcAnisetteClient<T>,
+    ) -> Result<Self, crate::Error> {
         let client = ClientBuilder::new()
             .cookie_store(true)
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
@@ -212,7 +217,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         appleid_closure: impl Fn() -> (String, String),
         tfa_closure: impl Fn() -> String,
         client_info: LoginClientInfo,
-        anisette: ArcAnisetteClient<T>
+        anisette: ArcAnisetteClient<T>,
     ) -> Result<AppleAccount<T>, Error> {
         AppleAccount::login_with_anisette(appleid_closure, tfa_closure, client_info, anisette).await
     }
@@ -257,7 +262,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         appleid_closure: F,
         tfa_closure: G,
         client_info: LoginClientInfo,
-        anisette: ArcAnisetteClient<T>
+        anisette: ArcAnisetteClient<T>,
     ) -> Result<AppleAccount<T>, Error> {
         let mut _self = AppleAccount::new_with_anisette(client_info, anisette)?;
         let (username, password) = appleid_closure();
@@ -281,9 +286,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
                 LoginState::LoggedIn => return Ok(_self),
                 LoginState::NeedsExtraStep(step) => {
                     if _self.get_pet().is_some() {
-                        return Ok(_self)
+                        return Ok(_self);
                     } else {
-                        return Err(Error::ExtraStep(step))
+                        return Err(Error::ExtraStep(step));
                     }
                 }
             }
@@ -296,8 +301,22 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     pub fn get_name(&self) -> (String, String) {
         (
-            self.spd.as_ref().unwrap().get("fn").unwrap().as_string().unwrap().to_string(),
-            self.spd.as_ref().unwrap().get("ln").unwrap().as_string().unwrap().to_string()
+            self.spd
+                .as_ref()
+                .unwrap()
+                .get("fn")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string(),
+            self.spd
+                .as_ref()
+                .unwrap()
+                .get("ln")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string(),
         )
     }
 
@@ -320,7 +339,17 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             HeaderValue::from_str("text/x-xml-plist").unwrap(),
         );
         gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
-        gsa_headers.extend(valid_anisette.get_gsservice_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
+        gsa_headers.extend(
+            valid_anisette
+                .get_gsservice_headers()
+                .into_iter()
+                .map(|(a, b)| {
+                    (
+                        HeaderName::from_str(&a).unwrap(),
+                        HeaderValue::from_str(&b).unwrap(),
+                    )
+                }),
+        );
 
         let request_id = Uuid::new_v4().to_string().to_uppercase();
 
@@ -352,7 +381,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .post(GSA_ENDPOINT)
             .headers(gsa_headers.clone())
             .body(buffer)
-            .send().await;
+            .send()
+            .await;
 
         let res = parse_response(res).await?;
         let err_check = Self::check_error(&res);
@@ -405,7 +435,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .post(GSA_ENDPOINT)
             .headers(gsa_headers.clone())
             .body(buffer)
-            .send().await;
+            .send()
+            .await;
 
         let res = parse_response(res).await?;
         let err_check = Self::check_error(&res);
@@ -423,9 +454,19 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let status = res.get("Status").unwrap().as_dictionary().unwrap();
 
         if let Some(Value::Dictionary(dict)) = decoded_spd.get("t") {
-            let keys: HashMap<String, String> = dict.iter().filter_map(|(service, value)| {
-                Some((service.clone(), value.as_dictionary()?.get("token")?.as_string()?.to_string()))
-            }).collect();
+            let keys: HashMap<String, String> = dict
+                .iter()
+                .filter_map(|(service, value)| {
+                    Some((
+                        service.clone(),
+                        value
+                            .as_dictionary()?
+                            .get("token")?
+                            .as_string()?
+                            .to_string(),
+                    ))
+                })
+                .collect();
             self.tokens = keys;
         }
         println!("spd {:?}", decoded_spd);
@@ -436,8 +477,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             return match s.as_str() {
                 "trustedDeviceSecondaryAuth" => Ok(LoginState::NeedsDevice2FA),
                 "secondaryAuth" => Ok(LoginState::NeedsSMS2FA),
-                _unk => Ok(LoginState::NeedsExtraStep(_unk.to_string()))
-            }
+                _unk => Ok(LoginState::NeedsExtraStep(_unk.to_string())),
+            };
         }
 
         Ok(LoginState::LoggedIn)
@@ -470,7 +511,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .client
             .get("https://gsa.apple.com/auth/verify/trusteddevice")
             .headers(headers.await?)
-            .send().await?;
+            .send()
+            .await?;
 
         if !res.status().is_success() {
             return Err(Error::AuthSrp);
@@ -482,13 +524,10 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     pub async fn send_sms_2fa_to_devices(&self, phone_id: u32) -> Result<LoginState, crate::Error> {
         let headers = self.build_2fa_headers(true);
 
-
         let body = VerifyBody {
-            phone_number: PhoneNumber {
-                id: phone_id
-            },
+            phone_number: PhoneNumber { id: phone_id },
             mode: "sms".to_string(),
-            security_code: None
+            security_code: None,
         };
 
         let res = self
@@ -497,7 +536,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .headers(headers.await?)
             .header("Accept", "application/json")
             .json(&body)
-            .send().await?;
+            .send()
+            .await?;
 
         if !res.status().is_success() {
             return Err(Error::AuthSrp);
@@ -509,20 +549,22 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     pub async fn get_auth_extras(&self) -> Result<AuthenticationExtras, Error> {
         let headers = self.build_2fa_headers(true);
 
-        let req = self.client
+        let req = self
+            .client
             .get("https://gsa.apple.com/auth")
             .headers(headers.await?)
             .header("Accept", "application/json")
-            .send().await?;
+            .send()
+            .await?;
         let status = req.status().as_u16();
         let mut new_state = req.json::<AuthenticationExtras>().await?;
         if status == 201 {
             new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {
                 phone_number: PhoneNumber {
-                    id: new_state.trusted_phone_numbers.first().unwrap().id
+                    id: new_state.trusted_phone_numbers.first().unwrap().id,
                 },
                 mode: "sms".to_string(),
-                security_code: None
+                security_code: None,
             }));
         }
 
@@ -531,7 +573,10 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     pub async fn request_update_account(&self) -> Result<String, Error> {
         let mut map = HashMap::new();
-        let adsid = self.spd.as_ref().unwrap()["adsid"].as_string().unwrap().to_string();
+        let adsid = self.spd.as_ref().unwrap()["adsid"]
+            .as_string()
+            .unwrap()
+            .to_string();
         let base_headers = self.anisette.lock().await.get_headers().await?.clone();
         map.extend(base_headers);
 
@@ -542,19 +587,27 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             ("X-Apple-GS-Token", base64::encode(format!("{}:{}", adsid, self.tokens["com.apple.gs.icloud.family.auth"]))),
             ("X-Apple-I-Current-Application", "com.apple.systempreferences.AppleIDSettings".to_string()),
             ("X-Apple-I-Current-Application-Version", "1".to_string()),
-            ("X-MMe-Client-Info", self.client_info.update_account_bundle_id.clone()),
+            ("X-MMe-Client-Info", self.client_info.mme_client_info_akd.clone()),
             ("X-MMe-Country", "US".to_string()),
             ("X-MMe-Language", "en,en-US".to_string()),
             ("x-apple-i-device-type", "1".to_string()),
         ].into_iter().map(|(a, b)| (a.to_string(), b)));
 
-        let header_map = HeaderMap::from_iter(map.into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), b.parse().unwrap())));
+        let header_map = HeaderMap::from_iter(
+            map.into_iter()
+                .map(|(a, b)| (HeaderName::from_str(&a).unwrap(), b.parse().unwrap())),
+        );
 
         let mut buffer = Vec::new();
         plist::to_writer_xml(&mut buffer, &Dictionary::new())?;
 
-        let text = self.client.post("https://setup.icloud.com/setup/update_account_ui")
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        let text = self
+            .client
+            .post("https://setup.icloud.com/setup/update_account_ui")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("Accept-Encoding", "gzip, deflate, br")
             .header("Accept-Language", "en-US,en")
             .header("Content-Type", "text/plist")
@@ -564,8 +617,10 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .header("Sec-Fetch-Site", "cross-site")
             .headers(header_map)
             .body(buffer)
-            .send().await?
-            .text().await?;
+            .send()
+            .await?
+            .text()
+            .await?;
 
         Ok(text)
     }
@@ -581,20 +636,26 @@ impl<T: AnisetteProvider> AppleAccount<T> {
                 HeaderName::from_str("security-code").unwrap(),
                 HeaderValue::from_str(&code).unwrap(),
             )
-            .send().await?;
+            .send()
+            .await?;
 
         let headers = res.headers().clone();
 
-        let res: plist::Dictionary =
-            plist::from_bytes(res.text().await?.as_bytes())?;
+        let res: plist::Dictionary = plist::from_bytes(res.text().await?.as_bytes())?;
 
         Self::check_error(&res)?;
 
-        self.tokens = headers.get_all("X-Apple-GS-Token").iter().map(|header| {
-            let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
-            let parts = decoded.split(":").collect::<Vec<&str>>();
-            (parts[0].to_string(), parts[1].to_string())
-        }).collect();
+        self.tokens = headers
+            .get_all("X-Apple-GS-Token")
+            .iter()
+            .map(|header| {
+                let decoded =
+                    String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!"))
+                        .expect("Decoded not utf8!");
+                let parts = decoded.split(":").collect::<Vec<&str>>();
+                (parts[0].to_string(), parts[1].to_string())
+            })
+            .collect();
 
         if let Some(pet) = headers.get("X-Apple-PE-Token") {
             self.parse_pet_header(pet.to_str().unwrap());
@@ -604,7 +665,11 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         Ok(LoginState::NeedsLogin)
     }
 
-    pub async fn verify_sms_2fa(&mut self, code: String, mut body: VerifyBody) -> Result<LoginState, Error> {
+    pub async fn verify_sms_2fa(
+        &mut self,
+        code: String,
+        mut body: VerifyBody,
+    ) -> Result<LoginState, Error> {
         let headers = self.build_2fa_headers(true).await?;
         // println!("Recieved code: {}", code);
 
@@ -616,17 +681,25 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .headers(headers)
             .header("accept", "application/json")
             .json(&body)
-            .send().await?;
+            .send()
+            .await?;
 
         if res.status() != 200 {
             return Err(Error::Bad2faCode);
         }
 
-        self.tokens = res.headers().get_all("X-Apple-GS-Token").iter().map(|header| {
-            let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
-            let parts = decoded.split(":").collect::<Vec<&str>>();
-            (parts[0].to_string(), parts[1].to_string())
-        }).collect();
+        self.tokens = res
+            .headers()
+            .get_all("X-Apple-GS-Token")
+            .iter()
+            .map(|header| {
+                let decoded =
+                    String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!"))
+                        .expect("Decoded not utf8!");
+                let parts = decoded.split(":").collect::<Vec<&str>>();
+                (parts[0].to_string(), parts[1].to_string())
+            })
+            .collect();
 
         if let Some(pet) = res.headers().get("X-Apple-PE-Token") {
             self.parse_pet_header(pet.to_str().unwrap());
@@ -638,7 +711,10 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     fn parse_pet_header(&mut self, data: &str) {
         let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
-        self.tokens.insert("com.apple.gs.idms.pet".to_string(), decoded.split(":").nth(1).unwrap().to_string());
+        self.tokens.insert(
+            "com.apple.gs.idms.pet".to_string(),
+            decoded.split(":").nth(1).unwrap().to_string(),
+        );
     }
 
     fn check_error(res: &plist::Dictionary) -> Result<(), Error> {
@@ -657,7 +733,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         Ok(())
     }
 
-    // pub async 
+    // pub async
 
     pub async fn build_2fa_headers(&self, sms: bool) -> Result<HeaderMap, crate::Error> {
         let spd = self.spd.as_ref().unwrap();
@@ -691,7 +767,6 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             "X-Apple-Identity-Token",
             HeaderValue::from_str(&identity_token).unwrap(),
         );
-
 
         Ok(headers)
     }

@@ -4,15 +4,15 @@
 //!
 //! If you want remote anisette, make sure the `remote-anisette` feature is enabled. (it's currently on by default)
 
+#[cfg(feature = "remote-clearadi")]
+use anisette_clearadi::ClearADIClient;
+#[cfg(target_os = "macos")]
+use aos_kit::AOSKitAnisetteProvider;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-#[cfg(feature = "remote-clearadi")]
-use anisette_clearadi::ClearADIClient;
-#[cfg(target_os = "macos")]
-use aos_kit::AOSKitAnisetteProvider;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -60,7 +60,7 @@ pub enum AnisetteError {
     #[error("ClearADI Error {0}")]
     ClearADIError(#[from] clearadi::ClearAdiError),
     #[error("{0}")]
-    Anyhow(#[from] anyhow::Error)
+    Anyhow(#[from] anyhow::Error),
 }
 
 pub const DEFAULT_ANISETTE_URL: &str = "https://ani.f1sh.me/";
@@ -68,30 +68,41 @@ pub const DEFAULT_ANISETTE_URL: &str = "https://ani.f1sh.me/";
 pub const DEFAULT_ANISETTE_URL_V3: &str = "https://ani.sidestore.io";
 
 pub trait AnisetteProvider {
-    fn get_anisette_headers(&mut self) -> impl std::future::Future<Output = Result<HashMap<String, String>, AnisetteError>> + Send;
+    fn get_anisette_headers(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<HashMap<String, String>, AnisetteError>> + Send;
 }
 
 // conditionally compile this
 #[cfg(not(target_os = "macos"))]
-pub type DefaultAnisetteProvider = ClearADIClient;
+pub type DefaultAnisetteProvider = remote_anisette_v3::AnisetteClient;
 #[cfg(not(target_os = "macos"))]
-pub fn default_provider(info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClient<DefaultAnisetteProvider> {
-    Arc::new(Mutex::new(AnisetteClient::new(ClearADIClient {
-        login_info: info,
-        configuration_path: path
-    })))
+pub fn default_provider(
+    info: LoginClientInfo,
+    path: PathBuf,
+) -> ArcAnisetteClient<DefaultAnisetteProvider> {
+    Arc::new(Mutex::new(AnisetteClient::new(
+        remote_anisette_v3::AnisetteClient {
+            login_info: info,
+            url: String::from("https://ani.sidestore.io"),
+            configuration_path: path,
+        },
+    )))
 }
-
 
 #[cfg(target_os = "macos")]
 pub type DefaultAnisetteProvider = AOSKitAnisetteProvider<'static>;
 #[cfg(target_os = "macos")]
-pub fn default_provider(info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClient<DefaultAnisetteProvider> {
-    Arc::new(Mutex::new(AnisetteClient::new(AOSKitAnisetteProvider::new().expect("Failed to load anisette provider?"))))
+pub fn default_provider(
+    info: LoginClientInfo,
+    path: PathBuf,
+) -> ArcAnisetteClient<DefaultAnisetteProvider> {
+    Arc::new(Mutex::new(AnisetteClient::new(
+        AOSKitAnisetteProvider::new().expect("Failed to load anisette provider?"),
+    )))
 }
 
 pub type ArcAnisetteClient<T> = Arc<Mutex<AnisetteClient<T>>>;
-
 
 pub struct AnisetteClient<T: AnisetteProvider> {
     provider: T,
@@ -109,7 +120,9 @@ impl<T: AnisetteProvider> AnisetteClient<T> {
     }
 
     pub async fn get_headers(&mut self) -> Result<&HashMap<String, String>, AnisetteError> {
-        let last_generated = SystemTime::now().duration_since(self.generated_at).unwrap_or(Duration::from_secs(120));
+        let last_generated = SystemTime::now()
+            .duration_since(self.generated_at)
+            .unwrap_or(Duration::from_secs(120));
 
         if last_generated > Duration::from_secs(60) {
             self.cached_headers = self.provider.get_anisette_headers().await?;
@@ -131,7 +144,5 @@ pub struct LoginClientInfo {
     pub browser_user_agent: String,
     pub hardware_headers: HashMap<String, String>,
     pub push_token: Option<String>,
-    pub update_account_bundle_id: String,
+    // pub update_account_bundle_id: String,
 }
-
-

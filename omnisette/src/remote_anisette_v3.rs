@@ -1,24 +1,23 @@
-
 // Implementing the SideStore Anisette v3 protocol
 
 use std::{collections::HashMap, fs, io::Cursor, path::PathBuf};
 
+use async_trait::async_trait;
 use base64::engine::general_purpose;
+use base64::Engine;
 use chrono::{DateTime, SubsecRound, Utc};
+use futures_util::{stream::StreamExt, SinkExt};
 use log::debug;
 use plist::{Data, Dictionary};
+use rand::Rng;
 use reqwest::{Certificate, Client, ClientBuilder, Proxy, RequestBuilder};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use rand::Rng;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
+use std::fmt::Write;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
-use futures_util::{stream::StreamExt, SinkExt};
-use std::fmt::Write;
-use base64::Engine;
-use async_trait::async_trait;
 
-use crate::{anisette_headers_provider::AnisetteHeadersProvider, AnisetteError, LoginClientInfo};
+use crate::{AnisetteError, AnisetteProvider, LoginClientInfo};
 
 const APPLE_ROOT: &[u8] = include_bytes!("../../icloud-auth/src/apple_root.der");
 
@@ -79,20 +78,27 @@ fn base64_decode(data: &str) -> Vec<u8> {
     general_purpose::STANDARD.decode(data.trim()).unwrap()
 }
 
-
 #[derive(Serialize, Deserialize)]
 pub struct AnisetteState {
-    #[serde(serialize_with = "bin_serialize", deserialize_with = "bin_deserialize_16")]
+    #[serde(
+        serialize_with = "bin_serialize",
+        deserialize_with = "bin_deserialize_16"
+    )]
     keychain_identifier: [u8; 16],
-    #[serde(serialize_with = "bin_serialize_opt", deserialize_with = "bin_deserialize_opt")]
+    #[serde(
+        serialize_with = "bin_serialize_opt",
+        deserialize_with = "bin_deserialize_opt"
+    )]
     adi_pb: Option<Vec<u8>>,
+    // provisioned: Option<ProvisionedAnisette>,
 }
 
 impl Default for AnisetteState {
     fn default() -> Self {
         AnisetteState {
             keychain_identifier: rand::thread_rng().gen::<[u8; 16]>(),
-            adi_pb: None
+            adi_pb: None,
+            // provisioned: None,
         }
     }
 }
@@ -117,8 +123,9 @@ impl AnisetteState {
     }
 }
 pub struct AnisetteClient {
-    login_info: LoginClientInfo,
-    url: String
+    pub login_info: LoginClientInfo,
+    pub url: String,
+    pub configuration_path: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -135,24 +142,36 @@ pub struct AnisetteData {
     routing_info: String,
     device_description: String,
     local_user_id: String,
-    device_unique_identifier: String
+    device_unique_identifier: String,
 }
 
 impl AnisetteData {
     pub fn get_headers(&self) -> HashMap<String, String> {
         let dt: DateTime<Utc> = Utc::now().round_subsecs(0);
-        
-        HashMap::from_iter([
-            ("X-Apple-I-Client-Time".to_string(), dt.format("%+").to_string().replace("+00:00", "Z")),
-            ("X-Apple-I-TimeZone".to_string(), "UTC".to_string()),
-            ("X-Apple-Locale".to_string(), "en_US".to_string()),
-            ("X-Apple-I-MD-RINFO".to_string(), self.routing_info.clone()),
-            ("X-Apple-I-MD-LU".to_string(), self.local_user_id.clone()),
-            ("X-Mme-Device-Id".to_string(), self.device_unique_identifier.clone()),
-            ("X-Apple-I-MD".to_string(), self.one_time_password.clone()),
-            ("X-Apple-I-MD-M".to_string(), self.machine_id.clone()),
-            ("X-Mme-Client-Info".to_string(), self.device_description.clone()),
-        ].into_iter())
+
+        HashMap::from_iter(
+            [
+                (
+                    "X-Apple-I-Client-Time".to_string(),
+                    dt.format("%+").to_string().replace("+00:00", "Z"),
+                ),
+                ("X-Apple-I-TimeZone".to_string(), "UTC".to_string()),
+                ("X-Apple-Locale".to_string(), "en_US".to_string()),
+                ("X-Apple-I-MD-RINFO".to_string(), self.routing_info.clone()),
+                ("X-Apple-I-MD-LU".to_string(), self.local_user_id.clone()),
+                (
+                    "X-Mme-Device-Id".to_string(),
+                    self.device_unique_identifier.clone(),
+                ),
+                ("X-Apple-I-MD".to_string(), self.one_time_password.clone()),
+                ("X-Apple-I-MD-M".to_string(), self.machine_id.clone()),
+                (
+                    "X-Mme-Client-Info".to_string(),
+                    self.device_description.clone(),
+                ),
+            ]
+            .into_iter(),
+        )
     }
 }
 
@@ -166,18 +185,28 @@ fn make_reqwest() -> Result<Client, AnisetteError> {
 }
 
 impl AnisetteClient {
-    pub async fn new(url: String, login_info: LoginClientInfo) -> Result<AnisetteClient, AnisetteError> {
+    pub async fn new(
+        url: String,
+        login_info: LoginClientInfo,
+        configuration_path: PathBuf,
+    ) -> Result<AnisetteClient, AnisetteError> {
         Ok(AnisetteClient {
             login_info,
-            url
+            url,
+            configuration_path,
         })
     }
 
-    fn build_apple_request(&self, state: &AnisetteState, mut builder: RequestBuilder) -> RequestBuilder {
+    fn build_apple_request(
+        &self,
+        state: &AnisetteState,
+        mut builder: RequestBuilder,
+    ) -> RequestBuilder {
         let dt: DateTime<Utc> = Utc::now().round_subsecs(0);
 
         // missing: Connection, Accept-Encdoing
-        builder = builder.header("User-Agent", &self.login_info.akd_user_agent)
+        builder = builder
+            .header("User-Agent", &self.login_info.akd_user_agent)
             .header("X-Apple-Baa-E", "-10000")
             .header("X-Apple-I-MD-LU", encode_hex(&state.md_lu()))
             .header("X-Mme-Device-Id", state.device_id())
@@ -188,7 +217,10 @@ impl AnisetteClient {
             .header("X-Apple-Client-App-Name", "akd")
             .header("Accept", "*/*")
             .header("Content-Type", "application/x-www-form-urlencoded") // not a bug, it's how you *think different*
-            .header("X-Apple-Baa-UE", "AKAuthenticationError:-7066|com.apple.devicecheck.error.baa:-10000")
+            .header(
+                "X-Apple-Baa-UE",
+                "AKAuthenticationError:-7066|com.apple.devicecheck.error.baa:-10000",
+            )
             .header("X-Apple-Host-Baa-E", "-7066");
 
         for item in &self.login_info.hardware_headers {
@@ -209,14 +241,19 @@ impl AnisetteClient {
         }
         let body = GetHeadersBody {
             identifier: base64_encode(&state.keychain_identifier),
-            adi_pb: base64_encode(state.adi_pb.as_ref().ok_or(AnisetteError::AnisetteNotProvisioned)?),
+            adi_pb: base64_encode(
+                state
+                    .adi_pb
+                    .as_ref()
+                    .ok_or(AnisetteError::AnisetteNotProvisioned)?,
+            ),
         };
 
         #[derive(Deserialize)]
         #[serde(tag = "result")]
         enum AnisetteHeaders {
             GetHeadersError {
-                message: String
+                message: String,
             },
             Headers {
                 #[serde(rename = "X-Apple-I-MD-M")]
@@ -225,13 +262,16 @@ impl AnisetteClient {
                 one_time_password: String,
                 #[serde(rename = "X-Apple-I-MD-RINFO")]
                 routing_info: String,
-            }
+            },
         }
 
-        let headers = http_client.post(path)
+        let headers = http_client
+            .post(path)
             .json(&body)
-            .send().await?
-            .json::<AnisetteHeaders>().await?;
+            .send()
+            .await?
+            .json::<AnisetteHeaders>()
+            .await?;
         match headers {
             AnisetteHeaders::GetHeadersError { message } => {
                 if message.contains("-45061") {
@@ -239,8 +279,12 @@ impl AnisetteClient {
                 } else {
                     panic!("Unknown error {}", message)
                 }
-            },
-            AnisetteHeaders::Headers { machine_id, one_time_password, routing_info } => {
+            }
+            AnisetteHeaders::Headers {
+                machine_id,
+                one_time_password,
+                routing_info,
+            } => {
                 // println!("before {one_time_password}");
                 // let mut decoded = base64_decode(&one_time_password);
                 // *decoded.last_mut().unwrap() = 0x1;
@@ -252,7 +296,7 @@ impl AnisetteClient {
                     routing_info,
                     device_description: self.login_info.mme_client_info.clone(),
                     local_user_id: encode_hex(&state.md_lu()),
-                    device_unique_identifier: state.device_id()
+                    device_unique_identifier: state.device_id(),
                 })
             }
         }
@@ -261,20 +305,42 @@ impl AnisetteClient {
     pub async fn provision(&self, state: &mut AnisetteState) -> Result<(), AnisetteError> {
         debug!("Provisioning Anisette");
         let http_client = make_reqwest()?;
-        let resp = self.build_apple_request(&state, http_client.get("https://gsa.apple.com/grandslam/GsService2/lookup"))
-            .send().await?;
+        let resp = self
+            .build_apple_request(
+                &state,
+                http_client.get("https://gsa.apple.com/grandslam/GsService2/lookup"),
+            )
+            .send()
+            .await?;
         let text = resp.text().await?;
 
         let protocol_val = plist::Value::from_reader(Cursor::new(text.as_str()))?;
-        let urls = protocol_val.as_dictionary().unwrap().get("urls").unwrap().as_dictionary().unwrap();
+        let urls = protocol_val
+            .as_dictionary()
+            .unwrap()
+            .get("urls")
+            .unwrap()
+            .as_dictionary()
+            .unwrap();
 
-        let start_provisioning_url = urls.get("midStartProvisioning").unwrap().as_string().unwrap();
-        let end_provisioning_url = urls.get("midFinishProvisioning").unwrap().as_string().unwrap();
-        debug!("Got provisioning urls: {} and {}", start_provisioning_url, end_provisioning_url);
+        let start_provisioning_url = urls
+            .get("midStartProvisioning")
+            .unwrap()
+            .as_string()
+            .unwrap();
+        let end_provisioning_url = urls
+            .get("midFinishProvisioning")
+            .unwrap()
+            .as_string()
+            .unwrap();
+        debug!(
+            "Got provisioning urls: {} and {}",
+            start_provisioning_url, end_provisioning_url
+        );
 
-        let provision_ws_url = format!("{}/v3/provisioning_session", self.url).replace("https://", "wss://");
+        let provision_ws_url =
+            format!("{}/v3/provisioning_session", self.url).replace("https://", "wss://");
         let (mut connection, _) = connect_async(&provision_ws_url).await?;
-
 
         #[derive(Deserialize)]
         #[serde(tag = "result")]
@@ -283,17 +349,17 @@ impl AnisetteClient {
             GiveStartProvisioningData,
             GiveEndProvisioningData {
                 #[allow(dead_code)] // it's not even dead, rust just has problems
-                cpim: String
+                cpim: String,
             },
             ProvisioningSuccess {
                 #[allow(dead_code)] // it's not even dead, rust just has problems
-                adi_pb: String
-            }
+                adi_pb: String,
+            },
         }
 
         loop {
             let Some(Ok(data)) = connection.next().await else {
-                continue
+                continue;
             };
             if data.is_text() {
                 let txt = data.to_text().unwrap();
@@ -302,44 +368,77 @@ impl AnisetteClient {
                     ProvisionInput::GiveIdentifier => {
                         #[derive(Serialize)]
                         struct Identifier {
-                            identifier: String // base64
+                            identifier: String, // base64
                         }
-                        let identifier = Identifier { identifier: base64_encode(&state.keychain_identifier) };
-                        connection.send(Message::Text(serde_json::to_string(&identifier)?)).await?;
-                    },
+                        let identifier = Identifier {
+                            identifier: base64_encode(&state.keychain_identifier),
+                        };
+                        connection
+                            .send(Message::Text(serde_json::to_string(&identifier)?))
+                            .await?;
+                    }
                     ProvisionInput::GiveStartProvisioningData => {
                         let http_client = make_reqwest()?;
-                        let body_data = ProvisionBodyData { header: Dictionary::new(), request: Dictionary::new() };
-                        let resp = self.build_apple_request(state, http_client.post(start_provisioning_url))
+                        let body_data = ProvisionBodyData {
+                            header: Dictionary::new(),
+                            request: Dictionary::new(),
+                        };
+                        let resp = self
+                            .build_apple_request(state, http_client.post(start_provisioning_url))
                             .body(plist_to_string(&body_data)?)
-                            .send().await?;
+                            .send()
+                            .await?;
                         let text = resp.text().await?;
 
                         let protocol_val = plist::Value::from_reader(Cursor::new(text.as_str()))?;
-                        let spim = protocol_val.as_dictionary().unwrap().get("Response").unwrap().as_dictionary().unwrap()
-                            .get("spim").unwrap().as_string().unwrap();
-                        
+                        let spim = protocol_val
+                            .as_dictionary()
+                            .unwrap()
+                            .get("Response")
+                            .unwrap()
+                            .as_dictionary()
+                            .unwrap()
+                            .get("spim")
+                            .unwrap()
+                            .as_string()
+                            .unwrap();
+
                         debug!("GiveStartProvisioningData");
                         #[derive(Serialize)]
                         struct Spim {
-                            spim: String // base64
+                            spim: String, // base64
                         }
-                        let spim = Spim { spim: spim.to_string() };
-                        connection.send(Message::Text(serde_json::to_string(&spim)?)).await?;
-                    },
+                        let spim = Spim {
+                            spim: spim.to_string(),
+                        };
+                        connection
+                            .send(Message::Text(serde_json::to_string(&spim)?))
+                            .await?;
+                    }
                     ProvisionInput::GiveEndProvisioningData { cpim } => {
                         let http_client = make_reqwest()?;
-                        let body_data = ProvisionBodyData { header: Dictionary::new(), request: Dictionary::from_iter([("cpim", cpim)].into_iter()) };
-                        let resp = self.build_apple_request(state, http_client.post(end_provisioning_url))
+                        let body_data = ProvisionBodyData {
+                            header: Dictionary::new(),
+                            request: Dictionary::from_iter([("cpim", cpim)].into_iter()),
+                        };
+                        let resp = self
+                            .build_apple_request(state, http_client.post(end_provisioning_url))
                             .body(plist_to_string(&body_data)?)
-                            .send().await?;
+                            .send()
+                            .await?;
                         let text = resp.text().await?;
 
                         let protocol_val = plist::Value::from_reader(Cursor::new(text.as_str()))?;
-                        let response = protocol_val.as_dictionary().unwrap().get("Response").unwrap().as_dictionary().unwrap();
+                        let response = protocol_val
+                            .as_dictionary()
+                            .unwrap()
+                            .get("Response")
+                            .unwrap()
+                            .as_dictionary()
+                            .unwrap();
 
                         debug!("GiveEndProvisioningData");
-                        
+
                         #[derive(Serialize)]
                         struct EndProvisioning<'t> {
                             ptm: &'t str,
@@ -349,8 +448,10 @@ impl AnisetteClient {
                             ptm: response.get("ptm").unwrap().as_string().unwrap(),
                             tk: response.get("tk").unwrap().as_string().unwrap(),
                         };
-                        connection.send(Message::Text(serde_json::to_string(&end_provisioning)?)).await?;
-                    },
+                        connection
+                            .send(Message::Text(serde_json::to_string(&end_provisioning)?))
+                            .await?;
+                    }
                     ProvisionInput::ProvisioningSuccess { adi_pb } => {
                         debug!("ProvisioningSuccess");
                         state.adi_pb = Some(base64_decode(&adi_pb));
@@ -367,18 +468,17 @@ impl AnisetteClient {
     }
 }
 
-
 impl AnisetteProvider for AnisetteClient {
     async fn get_anisette_headers(&mut self) -> Result<HashMap<String, String>, AnisetteError> {
         fs::create_dir_all(&self.configuration_path)?;
-        
+
         let config_path = self.configuration_path.join("state.plist");
         let mut state = if let Ok(text) = plist::from_file(&config_path) {
             text
         } else {
             AnisetteState::new()
         };
-        
+
         if !state.is_provisioned() {
             self.provision(&mut state).await?;
             plist::to_file_xml(&config_path, &state)?;
@@ -387,16 +487,15 @@ impl AnisetteProvider for AnisetteClient {
             Ok(data) => data,
             Err(err) => {
                 if matches!(err, AnisetteError::AnisetteNotProvisioned) {
-                    state.provisioned = None;
+                    state.adi_pb = None;
                     self.provision(&mut state).await?;
                     plist::to_file_xml(config_path, &mut state)?;
                     self.get_headers(&state).await?
-                } else { panic!() }
-            },
+                } else {
+                    panic!()
+                }
+            }
         };
         Ok(data.get_headers())
     }
 }
-
-
-

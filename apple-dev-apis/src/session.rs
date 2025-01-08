@@ -1,5 +1,6 @@
 use hmac::{Hmac, Mac};
 use icloud_auth::{anisette::AnisetteData, AppleAccount};
+use omnisette::AnisetteProvider;
 use sha2::{Digest, Sha256};
 
 pub struct XcodeSession {
@@ -9,7 +10,8 @@ pub struct XcodeSession {
 }
 
 impl XcodeSession {
-    pub fn with(account: &AppleAccount) -> XcodeSession {
+    pub fn with<T: AnisetteProvider>(account: &AppleAccount<T>) -> XcodeSession {
+        let _ = account;
         // let spd = account.spd.as_ref().unwrap();
         // // println!("spd: {:#?}", spd);
         // let dsid = spd.get("adsid").unwrap().as_string().unwrap();
